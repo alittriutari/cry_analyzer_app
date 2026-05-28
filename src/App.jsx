@@ -169,20 +169,26 @@ export default function BabyCryAnalyzer() {
     setMode("processing");
     setResult(null);
 
+    let data;
     try {
       const b64 = await toBase64(blob);
       const mimeType = blob.type || "audio/webm";
 
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          system: `You are an expert infant cry analyzer trained on acoustic patterns of baby cries. 
-Analyze the provided audio recording and determine the most likely reason the baby is crying based on cry acoustics, rhythm, pitch, and duration patterns.
+      const GEMINI_API_KEY = "AIzaSyDxAGetOZkmq12BfKfM5XGsgONWgRpKIPc";
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  {
+                    text: `You are an expert infant cry analyzer. Analyze this audio recording and determine the most likely reason the baby is crying based on acoustics, rhythm, pitch, and duration patterns.
  
-You MUST respond ONLY with a valid JSON object, no preamble, no markdown fences, like this:
+Respond ONLY with a valid JSON object, no preamble, no markdown fences:
 {
   "detected": true,
   "cry_type": "hunger",
@@ -200,38 +206,34 @@ You MUST respond ONLY with a valid JSON object, no preamble, no markdown fences,
 Valid cry_type values: hunger, tired, pain, gas, boredom, overstimulated, unknown
 If no cry is detected, set detected to false and cry_type to "unknown".
 confidence is 0-100. Be realistic — rarely above 85.`,
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "text",
-                  text: "Please analyze this audio recording for baby crying patterns and return your assessment as JSON.",
-                },
-                {
-                  type: "document",
-                  source: {
-                    type: "base64",
-                    media_type: mimeType,
-                    data: b64,
                   },
-                },
-              ],
-            },
-          ],
-        }),
-      });
+                  {
+                    inline_data: {
+                      mime_type: mimeType,
+                      data: b64,
+                    },
+                  },
+                ],
+              },
+            ],
+            generationConfig: { temperature: 0.2 },
+          }),
+        },
+      );
 
-      const data = await response.json();
-      const text = data.content?.find((c) => c.type === "text")?.text || "";
+      data = await response.json();
+      console.log("Gemini response:", data);
+
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
       const clean = text.replace(/```json|```/g, "").trim();
       const parsed = JSON.parse(clean);
       setResult(parsed);
       setMode("result");
     } catch (e) {
-      console.error(e);
+      const apiError = data?.error?.message || data?.error?.status || "";
+      console.error("Full error:", e, "API data:", data);
       setErrorMsg(
-        "Analysis failed. The audio may be too short, silent, or in an unsupported format.",
+        `Error: ${apiError || e.message || "Unknown"}. Open DevTools (F12) → Console for details.`,
       );
       setMode("error");
     }

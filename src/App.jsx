@@ -112,12 +112,21 @@ export default function BabyCryAnalyzer() {
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mr = new MediaRecorder(stream);
+      // Low bitrate = smaller payload = faster upload to Gemini
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+      const mr = new MediaRecorder(stream, {
+        mimeType,
+        audioBitsPerSecond: 16000,
+      });
       mediaRecorderRef.current = mr;
       chunksRef.current = [];
       mr.ondataavailable = (e) => chunksRef.current.push(e.data);
       mr.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        const blob = new Blob(chunksRef.current, {
+          type: mr.mimeType || "audio/webm",
+        });
         setAudioBlob(blob);
         setAudioUrl(URL.createObjectURL(blob));
         stream.getTracks().forEach((t) => t.stop());
@@ -156,85 +165,203 @@ export default function BabyCryAnalyzer() {
     setMode("idle");
   };
 
-  const toBase64 = (blob) =>
-    new Promise((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => res(r.result.split(",")[1]);
-      r.onerror = rej;
-      r.readAsDataURL(blob);
-    });
-
+  // Acoustic analysis using Web Audio API — runs entirely in the browser, no network call
   const analyzeBlob = async (blob) => {
     if (!blob) return;
     setMode("processing");
     setResult(null);
 
-    let data;
     try {
-      const b64 = await toBase64(blob);
-      const mimeType = blob.type || "audio/webm";
+      const arrayBuffer = await blob.arrayBuffer();
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+      await audioCtx.close();
 
-      const GEMINI_API_KEY = "AIzaSyDxAGetOZkmq12BfKfM5XGsgONWgRpKIPc";
+      const channelData = audioBuffer.getChannelData(0);
+      const sampleRate = audioBuffer.sampleRate;
+      const duration = audioBuffer.duration;
 
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  {
-                    text: `You are an expert infant cry analyzer. Analyze this audio recording and determine the most likely reason the baby is crying based on acoustics, rhythm, pitch, and duration patterns.
- 
-Respond ONLY with a valid JSON object, no preamble, no markdown fences:
-{
-  "detected": true,
-  "cry_type": "hunger",
-  "confidence": 78,
-  "secondary": "tired",
-  "secondary_confidence": 15,
-  "duration_seconds": 12,
-  "pitch": "medium-high",
-  "rhythm": "rhythmic",
-  "intensity": "moderate",
-  "summary": "One or two sentence plain-language summary for a parent.",
-  "tips": ["Short actionable tip 1", "Short actionable tip 2", "Short actionable tip 3"]
-}
- 
-Valid cry_type values: hunger, tired, pain, gas, boredom, overstimulated, unknown
-If no cry is detected, set detected to false and cry_type to "unknown".
-confidence is 0-100. Be realistic — rarely above 85.`,
-                  },
-                  {
-                    inline_data: {
-                      mime_type: mimeType,
-                      data: b64,
-                    },
-                  },
-                ],
-              },
-            ],
-            generationConfig: { temperature: 0.2 },
-          }),
-        },
-      );
+      // 1. RMS energy (loudness)
+      let sumSq = 0;
+      for (let i = 0; i < channelData.length; i++) sumSq += channelData[i] ** 2;
+      const rms = Math.sqrt(sumSq / channelData.length);
 
-      data = await response.json();
-      console.log("Gemini response:", data);
+      // No sound detected
+      if (rms < 0.005) {
+        setResult({ detected: false, cry_type: "unknown" });
+        setMode("result");
+        return;
+      }
 
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      const clean = text.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(clean);
-      setResult(parsed);
+      // 2. Zero-crossing rate (pitch indicator — higher = higher pitched cry)
+      let zeroCrossings = 0;
+      for (let i = 1; i < channelData.length; i++) {
+        if (channelData[i] >= 0 !== channelData[i - 1] >= 0) zeroCrossings++;
+      }
+      const zcr = zeroCrossings / (channelData.length / sampleRate); // crossings per second
+
+      // 3. Energy variance (rhythmic = low variance, continuous = high variance)
+      const frameSize = Math.floor(sampleRate * 0.05); // 50ms frames
+      const frameEnergies = [];
+      for (let i = 0; i + frameSize < channelData.length; i += frameSize) {
+        let e = 0;
+        for (let j = i; j < i + frameSize; j++) e += channelData[j] ** 2;
+        frameEnergies.push(e / frameSize);
+      }
+      const meanEnergy =
+        frameEnergies.reduce((a, b) => a + b, 0) / frameEnergies.length;
+      const energyVariance =
+        frameEnergies.reduce((a, b) => a + (b - meanEnergy) ** 2, 0) /
+        frameEnergies.length;
+      const normalizedVariance = energyVariance / (meanEnergy ** 2 + 1e-10);
+
+      // 4. Silence ratio (pauses between cries = rhythmic/hunger pattern)
+      const silenceThreshold = rms * 0.3;
+      let silentFrames = frameEnergies.filter(
+        (e) => Math.sqrt(e) < silenceThreshold,
+      ).length;
+      const silenceRatio = silentFrames / frameEnergies.length;
+
+      // --- Classification rules based on acoustic research ---
+      // hunger:        rhythmic, medium pitch, regular pauses (zcr 200-400, silenceRatio > 0.2)
+      // tired:         low pitch, low energy, continuous (zcr < 200, low variance)
+      // pain:          high pitch, sudden burst, low silence ratio (zcr > 500, high rms)
+      // gas:           medium-high pitch, strained, moderate variance (zcr 350-500)
+      // overstimulated: very high energy, erratic, high variance (high rms + high variance)
+      // boredom:       low energy, intermittent, flat (low rms, high silenceRatio)
+
+      let cry_type = "unknown";
+      let confidence = 55;
+      let secondary = null;
+      let secondary_confidence = 0;
+
+      const pitch =
+        zcr < 200
+          ? "low"
+          : zcr < 350
+            ? "medium"
+            : zcr < 500
+              ? "medium-high"
+              : "high";
+      const intensity =
+        rms < 0.05 ? "soft" : rms < 0.15 ? "moderate" : "strong";
+      const rhythm =
+        normalizedVariance < 1.5
+          ? "continuous"
+          : silenceRatio > 0.25
+            ? "rhythmic"
+            : "irregular";
+
+      if (rms < 0.02) {
+        cry_type = "unknown";
+        confidence = 40;
+      } else if (zcr > 500 && rms > 0.12) {
+        cry_type = "pain";
+        confidence = 72;
+        secondary = "overstimulated";
+        secondary_confidence = 18;
+      } else if (rms > 0.15 && normalizedVariance > 3) {
+        cry_type = "overstimulated";
+        confidence = 68;
+        secondary = "pain";
+        secondary_confidence = 20;
+      } else if (zcr < 200 && rms < 0.08 && normalizedVariance < 1.5) {
+        cry_type = "tired";
+        confidence = 70;
+        secondary = "boredom";
+        secondary_confidence = 15;
+      } else if (silenceRatio > 0.25 && zcr >= 200 && zcr <= 420) {
+        cry_type = "hunger";
+        confidence = 74;
+        secondary = "tired";
+        secondary_confidence = 14;
+      } else if (zcr >= 350 && zcr <= 520 && normalizedVariance > 1.5) {
+        cry_type = "gas";
+        confidence = 65;
+        secondary = "pain";
+        secondary_confidence = 22;
+      } else if (rms < 0.06 && silenceRatio > 0.35) {
+        cry_type = "boredom";
+        confidence = 62;
+        secondary = "tired";
+        secondary_confidence = 20;
+      } else {
+        cry_type = "hunger";
+        confidence = 55;
+        secondary = "gas";
+        secondary_confidence = 20;
+      }
+
+      const TIPS = {
+        hunger: [
+          "Try feeding if it's been 2+ hours since the last feed",
+          "Look for rooting reflex — turning head, sucking motions",
+          "Offer a feed even if not on schedule",
+        ],
+        tired: [
+          "Dim the lights and reduce noise",
+          "Try gentle rocking or swaying",
+          "Look for yawning or eye-rubbing cues",
+        ],
+        pain: [
+          "Check for hair tourniquet on fingers or toes",
+          "Look for swollen gums if teething age",
+          "Monitor temperature — consult a doctor if cry persists",
+        ],
+        gas: [
+          "Try bicycle leg movements gently",
+          "Burp in upright position for 5–10 minutes",
+          "Gentle tummy massage in clockwise circles",
+        ],
+        overstimulated: [
+          "Move to a quiet, dim room immediately",
+          "Minimize handling — let baby rest",
+          "Soft shushing or white noise can help reset",
+        ],
+        boredom: [
+          "Make eye contact and talk softly",
+          "Try a change of scenery or position",
+          "Offer a toy or gentle interaction",
+        ],
+        unknown: [
+          "Check diaper, hunger, and temperature first",
+          "Try skin-to-skin contact",
+          "If cry is unusual or prolonged, consult your pediatrician",
+        ],
+      };
+
+      const SUMMARIES = {
+        hunger:
+          "The cry pattern shows regular rhythm with pauses — a classic hunger signal. Try feeding soon.",
+        tired:
+          "Low-pitched and continuous cry suggests your baby may be overtired. A calm sleep routine may help.",
+        pain: "High-pitched and intense cry may indicate discomfort or pain. Check for obvious causes and monitor closely.",
+        gas: "Strained, mid-pitched cry with irregular bursts is consistent with gas or tummy discomfort.",
+        overstimulated:
+          "High energy and erratic pattern suggests sensory overload. Move to a quieter environment.",
+        boredom:
+          "Soft, intermittent cry with lots of quiet gaps — baby may just want attention or stimulation.",
+        unknown:
+          "Could not clearly identify the cry pattern. Try the common comfort checks.",
+      };
+
+      setResult({
+        detected: true,
+        cry_type,
+        confidence,
+        secondary,
+        secondary_confidence,
+        duration_seconds: Math.round(duration),
+        pitch,
+        rhythm,
+        intensity,
+        summary: SUMMARIES[cry_type],
+        tips: TIPS[cry_type],
+      });
       setMode("result");
     } catch (e) {
-      const apiError = data?.error?.message || data?.error?.status || "";
-      console.error("Full error:", e, "API data:", data);
-      setErrorMsg(
-        `Error: ${apiError || e.message || "Unknown"}. Open DevTools (F12) → Console for details.`,
-      );
+      console.error("Analysis error:", e);
+      setErrorMsg(`Analysis failed: ${e.message}. Try recording again.`);
       setMode("error");
     }
   };

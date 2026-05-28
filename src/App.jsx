@@ -86,6 +86,7 @@ const CircularProgress = ({ value, color }) => {
 
 export default function BabyCryAnalyzer() {
   const [mode, setMode] = useState("idle"); // idle | recording | processing | result | error
+  const [activeTab, setActiveTab] = useState("tips");
   const [audioBlob, setAudioBlob] = useState(null);
   const [audioUrl, setAudioUrl] = useState(null);
   const [result, setResult] = useState(null);
@@ -345,6 +346,72 @@ export default function BabyCryAnalyzer() {
           "Could not clearly identify the cry pattern. Try the common comfort checks.",
       };
 
+      const CUES = {
+        // Based on: Glodowski et al. (2019), Journal of Applied Behavior Analysis — rooting as empirically validated hunger cue;
+        // USDA WIC Infant Developmental Skills and Hunger-Satiety Cues guidance (2022);
+        // Frontiers in AI: Machine learning-based infant crying interpretation (Hammoud et al., 2024)
+        hunger: [
+          "Rooting reflex: turns head toward cheek/mouth stimulus searching for nipple — empirically validated pre-cry hunger signal (Glodowski et al., 2019, J. Applied Behavior Analysis)",
+          "Repetitive hand-to-mouth movement: brings fists or fingers to mouth even without a nipple present, often paired with sucking motions — early-stage hunger cue preceding crying (USDA WIC, 2022)",
+          "Lip smacking, licking, or tongue thrusting: oral motor activity without feeding stimulus — classified as an early hunger cue that precedes late-stage crying (East Lake Pediatrics, 2026)",
+          "Increased alertness and restlessness: hungry infant becomes more wakeful, moves more actively; crying is a late-stage signal after subtler cues have been missed (Hammoud et al., 2024, Frontiers AI)",
+          "Rhythmic cry pattern with regular pauses: acoustic research shows hunger cries follow a predictable expiration–pause–inspiration cycle at medium fundamental frequency (Ji et al., 2021, J. Audio Speech Music Processing)",
+        ],
+        // Based on: Taking Cara Babies neonatal nursing framework; Wolke et al. (2017) meta-analysis on fussing/crying;
+        // Kurth et al. (2011) systematic review; Momcozy/physiological sleep-pressure research
+        tired: [
+          "Eyelid drooping and heavy-lidded gaze: sleep pressure builds visibly; infant loses ability to maintain eye focus — early fatigue indicator before crying onset (Momcozy Sleep Research, 2026)",
+          "Yawning repeatedly: involuntary jaw-drop yawning is a neurological signal of rising sleep pressure; often appears 10–20 minutes before ideal sleep window closes",
+          "Decreased visual tracking: stops following faces or objects with eyes; glassy, unfocused stare is a hallmark of approaching sleep onset (Taking Cara Babies neonatal framework)",
+          "Rubbing eyes, ears, or face with hands: self-soothing gesture indicating fatigue; infant attempts to block sensory input as arousal threshold lowers",
+          "Cry escalates to arching back and pushing away: late-stage overtiredness releases cortisol/adrenaline, causing the infant to appear paradoxically 'wired' and harder to settle (Momcozy, 2026)",
+        ],
+        // Based on: Grunau & Craig Neonatal Facial Coding System (NFCS); DiLorenzo et al. (2018), Journal of Pain;
+        // Neonatal Facial Coding System Scores and Spectral Cry Measures, Clinical Journal of Pain (2007);
+        // ChatterBaby acoustic study — Defining and distinguishing infant behavioral states (PMC7033040)
+        pain: [
+          "Brow lowering and brow bulge: forehead furrows inward — one of the 3 core NFCS facial action units validated for neonatal pain assessment (Grunau & Craig; DiLorenzo et al., 2018, J. Pain)",
+          "Nasolabial furrow deepening and horizontal mouth stretch: facial muscle tension around the mouth is a reliable NFCS pain indicator; combined with eye squeeze, constitutes a high-pain facial pattern",
+          "Sudden high-pitched, maximum-intensity cry: pain cries show significantly higher acoustic energy, longer voiced periods, and elevated fundamental frequency vs. hunger/fussiness cries (ChatterBaby, PMC7033040, 2020)",
+          "Rigid body posture and limb stiffness: FLACC scale (Faces, Legs, Activity, Cry, Consolability) scores body rigidity as a core pain behavior indicator in infants; legs may draw up sharply toward abdomen",
+          "Inconsolable despite feeding, holding, or rocking: pain cry is distinguished from hunger/tired by its resistance to standard soothing — persistent crying warrants medical evaluation (NIPS clinical guideline)",
+        ],
+        // Based on: Frontiers in AI classification: hunger/stomachache/burping categories (Wu et al., 2020);
+        // Pediatric gastroenterology: infantile colic behavioral signs; FLACC and MBPS body movement indicators
+        gas: [
+          "Drawing knees up toward abdomen repeatedly: reflex response to intestinal cramping; infant alternates between extending and pulling up legs as gas moves through immature gut",
+          "Abdominal distension: belly appears visibly rounder or firmer than usual — gas accumulation in intestinal loops causes measurable distension, especially after feeds",
+          "Cry occurs in waves with brief lulls: unlike continuous pain cry, gas discomfort follows peristaltic contractions — cry intensifies during spasm, eases slightly between episodes (Wu et al., 2020, Frontiers AI)",
+          "Audible gut sounds, passing flatus, or belching during or after cry episode: direct acoustic evidence of intestinal gas movement; often brings temporary relief from crying",
+          "Arching back during or after feeding: combined with leg-pulling, back arching during feeds suggests gastroesophageal reflux or trapped gas — requires positional adjustment and upright burping",
+        ],
+        // Based on: ChildCareEd infant cues framework; physiological research on cortisol/sensory overload in neonates;
+        // Frontiers AI classification: discomfort/overstimulation behavioral patterns
+        overstimulated: [
+          "Gaze aversion and active eye-closing: infant deliberately turns head away or shuts eyes to block visual input — a self-regulatory shutdown response when sensory threshold is exceeded (ChildCareEd, 2024)",
+          "Hiccupping, spitting up, or sneezing in clusters: autonomic nervous system dysregulation under sensory overload; increased vagal tone triggers GI responses as a stress byproduct",
+          "Rapid escalation from calm to full cry within seconds: overstimulated infants lack the graduated hunger-type cry buildup — arousal jumps directly to peak intensity in high-stimulus environments",
+          "Flailing, uncoordinated arm and leg movements: motor disorganization under overload; differs from pain rigidity — limbs move erratically rather than tensing toward a focal point",
+          "Immediate calming in quiet, dim environment: removal from stimulus source causes rapid cry reduction — the strongest diagnostic indicator distinguishing overstimulation from pain or hunger",
+        ],
+        // Based on: Infant behavioral state research (Wolke et al., 2017 meta-analysis, J. Pediatrics);
+        // Keefe et al. (1996) — colic infants more alert and demanding; general pediatric behavioral observation
+        boredom: [
+          "Cry pauses immediately when a new face, object, or sound is introduced: attention-driven interruption of fussing is the defining feature of boredom cry — distinct from hunger/pain which do not resolve with distraction",
+          "Maintains alert, wide-eyed gaze between cry bursts: infant is neurologically aroused, not tired; eyes track environment actively, seeking stimulation input",
+          "Reaches toward or orients body toward people and objects: purposeful motor engagement during cry pauses indicates the infant is seeking social interaction, not physical relief",
+          "Low-intensity, intermittent fussing with long quiet gaps: acoustic energy is low compared to pain/hunger; cry lacks urgency and rhythmic hunger pattern (Wolke et al., 2017, J. Pediatrics meta-analysis)",
+          "Responds positively to talking, singing, or change of position: social and environmental responsiveness differentiates boredom from other cry types; brief interaction resets arousal state",
+        ],
+        unknown: [
+          "Check diaper for wetness, rash, or soiling — skin irritation from a rash can produce a pain-like cry that resolves after changing",
+          "Palpate back of neck (not forehead) for temperature — fever in infants under 3 months requires urgent medical attention regardless of cry pattern",
+          "Inspect fingers, toes, and genitals for hair tourniquet — a strand of hair wrapped around a digit causes intense, localized pain cry that is unresponsive to feeding or rocking",
+          "Observe whether cry intensity changes with position changes — gas and reflux pain typically worsen lying flat and improve upright; this helps narrow the cause",
+          "Note cry timing relative to feeds: crying 1–2 hrs post-feed suggests gas/reflux; immediately before feed suggests hunger; unrelated to feeds may indicate pain or overstimulation",
+        ],
+      };
+
       setResult({
         detected: true,
         cry_type,
@@ -357,6 +424,7 @@ export default function BabyCryAnalyzer() {
         intensity,
         summary: SUMMARIES[cry_type],
         tips: TIPS[cry_type],
+        cues: CUES[cry_type],
       });
       setMode("result");
     } catch (e) {
@@ -373,6 +441,7 @@ export default function BabyCryAnalyzer() {
     setResult(null);
     setErrorMsg("");
     setElapsed(0);
+    setActiveTab("cues");
   };
 
   const fmt = (s) =>
@@ -616,13 +685,30 @@ export default function BabyCryAnalyzer() {
         .tip-item {
           display: flex; align-items: flex-start; gap: 10px;
           padding: 9px 0; border-bottom: 1px solid #F3F0F9;
-          font-size: 0.85rem; color: #3D2B5E; line-height: 1.4;
+          font-size: 0.85rem; color: #3D2B5E; line-height: 1.4; text-align: justify;
         }
         .tip-item:last-child { border: none; }
         .tip-dot {
           width: 6px; height: 6px; border-radius: 50%;
           background: #FF6B9D; margin-top: 6px; flex-shrink: 0;
         }
+ 
+        .tab-bar {
+          display: flex; gap: 8px; margin: 16px 0 0;
+        }
+        .tab-btn {
+          flex: 1; padding: 9px 8px;
+          border: 1.5px solid #EDE9F6; border-radius: 12px;
+          background: transparent; cursor: pointer;
+          font-size: 0.78rem; font-weight: 600; color: #9C7AB8;
+          font-family: 'DM Sans', sans-serif;
+          transition: all 0.15s;
+        }
+        .tab-btn:hover { background: #FAF7FF; border-color: #C4B5FD; }
+        .tab-btn.active {
+          background: #F5F0FF; border-color: #C44DBA; color: #C44DBA;
+        }
+        .tab-content { margin-top: 4px; }
  
         .reset-btn {
           width: 100%; padding: 12px;
@@ -830,17 +916,47 @@ export default function BabyCryAnalyzer() {
                   <div className="summary-box">{result.summary}</div>
                 )}
 
-                {result.tips?.length > 0 && (
-                  <>
-                    <div className="tips-title">What to try</div>
-                    {result.tips.map((tip, i) => (
+                {/* Tabs */}
+                <div className="tab-bar">
+                  {["tips", "cues"].map((tab) => (
+                    <button
+                      key={tab}
+                      className={`tab-btn ${activeTab === tab ? "active" : ""}`}
+                      onClick={() => setActiveTab(tab)}
+                    >
+                      {tab === "cues"
+                        ? "👀 Signs to Look For"
+                        : "💡 What to Try"}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="tab-content">
+                  {activeTab === "cues" &&
+                    result.cues?.map((cue, i) => {
+                      const citationMatch = cue.match(
+                        /^(.*?)\s*(\([^)]*\d{4}[^)]*\))\s*$/,
+                      );
+                      const mainText = citationMatch ? citationMatch[1] : cue;
+                      return (
+                        <div className="tip-item" key={i}>
+                          <div
+                            className="tip-dot"
+                            style={{ background: "#A78BFA" }}
+                          />
+                          {mainText}
+                        </div>
+                      );
+                    })}
+
+                  {activeTab === "tips" &&
+                    result.tips?.map((tip, i) => (
                       <div className="tip-item" key={i}>
                         <div className="tip-dot" />
                         {tip}
                       </div>
                     ))}
-                  </>
-                )}
+                </div>
 
                 <button className="reset-btn" onClick={reset}>
                   ↩ Analyze Another
